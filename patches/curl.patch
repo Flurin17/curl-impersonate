@@ -811,7 +811,7 @@ index 0000000000..117cb3c816
 +git df curl-8_22_0 -- . ':(exclude)tests/**' > chrome.patch
 +mv chrome.patch ../curl-impersonate/patches/curl.patch
 diff --git a/include/curl/curl.h b/include/curl/curl.h
-index b904e49530..5e05a77eaa 100644
+index b904e49530..ec3c96d79e 100644
 --- a/include/curl/curl.h
 +++ b/include/curl/curl.h
 @@ -187,6 +187,10 @@ typedef enum {
@@ -837,7 +837,7 @@ index b904e49530..5e05a77eaa 100644
  /*
   * All CURLOPT_* values.
   */
-@@ -2288,6 +2297,167 @@ typedef enum {
+@@ -2288,6 +2297,175 @@ typedef enum {
    /* Space-separated list of components to sign for HTTP Message Signatures */
    CURLOPT(CURLOPT_HTTPSIG_HEADERS, CURLOPTTYPE_STRINGPOINT, 332),
  
@@ -1002,10 +1002,18 @@ index b904e49530..5e05a77eaa 100644
 +   * randomized distribution; non-negative values select a fixed number. */
 +  CURLOPT(CURLOPT_QUIC_INITIAL_PACKET_NUMBER, CURLOPTTYPE_LONG, 1041),
 +
++  /* curl-impersonate: Send a GREASE value in the signature_algorithms
++   * extension, as Chrome does since version 152. Not applied to QUIC. */
++  CURLOPT(CURLOPT_TLS_GREASE_SIGALGS, CURLOPTTYPE_LONG, 1042),
++
++  /* curl-impersonate: Shuffle the CURLOPT_TLS_TRUST_ANCHORS wire order on
++   * each connection (default). 0 sends the IDs in the configured order. */
++  CURLOPT(CURLOPT_TLS_TRUST_ANCHORS_SHUFFLE, CURLOPTTYPE_LONG, 1043),
++
    CURLOPT_LASTENTRY /* the last unused */
  } CURLoption;
  
-@@ -3022,7 +3192,14 @@ typedef enum {
+@@ -3022,7 +3200,14 @@ typedef enum {
    CURLINFO_HTTPAUTH_USED    = CURLINFO_LONG + 69,
    CURLINFO_PROXYAUTH_USED   = CURLINFO_LONG + 70,
    CURLINFO_SIZE_DELIVERED   = CURLINFO_OFF_T + 71,
@@ -1509,7 +1517,7 @@ index d5337eb353..b2fb669979 100644
  /**
   * Return the n-th header entry or NULL if it does not exist.
 diff --git a/lib/easy.c b/lib/easy.c
-index 04c5a003a0..d37fa18c81 100644
+index 04c5a003a0..a1ec35cc9d 100644
 --- a/lib/easy.c
 +++ b/lib/easy.c
 @@ -71,10 +71,14 @@
@@ -1527,7 +1535,7 @@ index 04c5a003a0..d37fa18c81 100644
  
  #include "easy_lock.h"
  
-@@ -330,6 +334,408 @@ CURLsslset curl_global_sslset(curl_sslbackend id, const char *name,
+@@ -330,6 +334,417 @@ CURLsslset curl_global_sslset(curl_sslbackend id, const char *name,
    return rc;
  }
  
@@ -1641,6 +1649,10 @@ index 04c5a003a0..d37fa18c81 100644
 +  if(opts->tls_trust_anchors) {
 +    ret = curl_easy_setopt(data, CURLOPT_TLS_TRUST_ANCHORS,
 +                           opts->tls_trust_anchors);
++    if(ret)
++      return ret;
++    ret = curl_easy_setopt(data, CURLOPT_TLS_TRUST_ANCHORS_SHUFFLE,
++                           opts->tls_trust_anchors_no_shuffle ? 0L : 1L);
 +    if(ret)
 +      return ret;
 +  }
@@ -1779,6 +1791,11 @@ index 04c5a003a0..d37fa18c81 100644
 +  }
 +
 +  ret = curl_easy_setopt(data, CURLOPT_TLS_GREASE, opts->tls_grease);
++  if(ret)
++    return ret;
++
++  ret = curl_easy_setopt(data, CURLOPT_TLS_GREASE_SIGALGS,
++                         opts->tls_grease_sigalgs);
 +  if(ret)
 +    return ret;
 +
@@ -1936,7 +1953,7 @@ index 04c5a003a0..d37fa18c81 100644
  /*
   * curl_easy_init() is the external interface to alloc, setup and init an
   * easy handle that is returned. If anything goes wrong, NULL is returned.
-@@ -338,6 +744,8 @@ CURL *curl_easy_init(void)
+@@ -338,6 +753,8 @@ CURL *curl_easy_init(void)
  {
    CURLcode result;
    struct Curl_easy *data;
@@ -1945,7 +1962,7 @@ index 04c5a003a0..d37fa18c81 100644
  
    /* Make sure we inited the global SSL stuff */
    global_init_lock();
-@@ -360,6 +768,30 @@ CURL *curl_easy_init(void)
+@@ -360,6 +777,30 @@ CURL *curl_easy_init(void)
      return NULL;
    }
  
@@ -1976,7 +1993,7 @@ index 04c5a003a0..d37fa18c81 100644
    return data;
  }
  
-@@ -1050,6 +1482,13 @@ CURL *curl_easy_duphandle(CURL *curl)
+@@ -1050,6 +1491,13 @@ CURL *curl_easy_duphandle(CURL *curl)
          goto fail;
      }
  
@@ -1990,7 +2007,7 @@ index 04c5a003a0..d37fa18c81 100644
      /* Reinitialize an SSL engine for the new handle
       * note: the engine name has already been copied by dupset */
      str = CURL_EASY_STR(outcurl, STRING_SSL_ENGINE);
-@@ -1145,6 +1584,21 @@ void curl_easy_reset(CURL *curl)
+@@ -1145,6 +1593,21 @@ void curl_easy_reset(CURL *curl)
      Curl_http_auth_cleanup_digest(data);
  #endif
      data->master_mid = UINT32_MAX;
@@ -2013,7 +2030,7 @@ index 04c5a003a0..d37fa18c81 100644
    CURL_EAPI_LEAVE(&guard);
  }
 diff --git a/lib/easyoptions.c b/lib/easyoptions.c
-index 1643ec3256..78a0f2e9ca 100644
+index 1643ec3256..590691b0d6 100644
 --- a/lib/easyoptions.c
 +++ b/lib/easyoptions.c
 @@ -99,6 +99,7 @@ const struct curl_easyoption Curl_easyopts[] = {
@@ -2122,7 +2139,7 @@ index 1643ec3256..78a0f2e9ca 100644
    { "STREAM_WEIGHT", CURLOPT_STREAM_WEIGHT, CURLOT_LONG, 0 },
    { "SUPPRESS_CONNECT_HEADERS", CURLOPT_SUPPRESS_CONNECT_HEADERS,
      CURLOT_LONG, 0 },
-@@ -355,6 +392,20 @@ const struct curl_easyoption Curl_easyopts[] = {
+@@ -355,6 +392,23 @@ const struct curl_easyoption Curl_easyopts[] = {
    { "TLSAUTH_PASSWORD", CURLOPT_TLSAUTH_PASSWORD, CURLOT_STRING, 0 },
    { "TLSAUTH_TYPE", CURLOPT_TLSAUTH_TYPE, CURLOT_STRING, 0 },
    { "TLSAUTH_USERNAME", CURLOPT_TLSAUTH_USERNAME, CURLOT_STRING, 0 },
@@ -2130,6 +2147,7 @@ index 1643ec3256..78a0f2e9ca 100644
 +    CURLOT_STRING, 0 },
 +  { "TLS_EXTENSION_ORDER", CURLOPT_TLS_EXTENSION_ORDER, CURLOT_STRING, 0 },
 +  { "TLS_GREASE", CURLOPT_TLS_GREASE, CURLOT_LONG, 0 },
++  { "TLS_GREASE_SIGALGS", CURLOPT_TLS_GREASE_SIGALGS, CURLOT_LONG, 0 },
 +  { "TLS_KEY_SHARES_LIMIT", CURLOPT_TLS_KEY_SHARES_LIMIT, CURLOT_LONG, 0 },
 +  { "TLS_KEY_USAGE_NO_CHECK", CURLOPT_TLS_KEY_USAGE_NO_CHECK,
 +    CURLOT_LONG, 0 },
@@ -2138,12 +2156,14 @@ index 1643ec3256..78a0f2e9ca 100644
 +    CURLOT_LONG, 0 },
 +  { "TLS_STATUS_REQUEST", CURLOPT_TLS_STATUS_REQUEST, CURLOT_LONG, 0 },
 +  { "TLS_TRUST_ANCHORS", CURLOPT_TLS_TRUST_ANCHORS, CURLOT_STRING, 0 },
++  { "TLS_TRUST_ANCHORS_SHUFFLE", CURLOPT_TLS_TRUST_ANCHORS_SHUFFLE,
++    CURLOT_LONG, 0 },
 +  { "TLS_USE_NEW_ALPS_CODEPOINT", CURLOPT_TLS_USE_NEW_ALPS_CODEPOINT,
 +    CURLOT_LONG, 0 },
    { "TRAILERDATA", CURLOPT_TRAILERDATA, CURLOT_CBPTR, 0 },
    { "TRAILERFUNCTION", CURLOPT_TRAILERFUNCTION, CURLOT_FUNCTION, 0 },
    { "TRANSFERTEXT", CURLOPT_TRANSFERTEXT, CURLOT_LONG, 0 },
-@@ -375,7 +426,12 @@ const struct curl_easyoption Curl_easyopts[] = {
+@@ -375,7 +429,12 @@ const struct curl_easyoption Curl_easyopts[] = {
    { "WRITEDATA", CURLOPT_WRITEDATA, CURLOT_CBPTR, 0 },
    { "WRITEFUNCTION", CURLOPT_WRITEFUNCTION, CURLOT_FUNCTION, 0 },
    { "WRITEHEADER", CURLOPT_HEADERDATA, CURLOT_CBPTR, CURLOT_FLAG_ALIAS },
@@ -2156,7 +2176,7 @@ index 1643ec3256..78a0f2e9ca 100644
    { "XFERINFODATA", CURLOPT_XFERINFODATA, CURLOT_CBPTR, 0 },
    { "XFERINFOFUNCTION", CURLOPT_XFERINFOFUNCTION, CURLOT_FUNCTION, 0 },
    { "XOAUTH2_BEARER", CURLOPT_XOAUTH2_BEARER, CURLOT_STRING, 0 },
-@@ -389,6 +445,6 @@ const struct curl_easyoption Curl_easyopts[] = {
+@@ -389,6 +448,6 @@ const struct curl_easyoption Curl_easyopts[] = {
   */
  int Curl_easyopts_check(void)
  {
@@ -3369,10 +3389,10 @@ index c3270da1cc..807f0ad6ae 100644
   * Store nghttp2 version info in this buffer.
 diff --git a/lib/impersonate.c b/lib/impersonate.c
 new file mode 100644
-index 0000000000..aad5688f4f
+index 0000000000..382ce2005d
 --- /dev/null
 +++ b/lib/impersonate.c
-@@ -0,0 +1,2371 @@
+@@ -0,0 +1,2800 @@
 +#include "curl_setup.h"
 +#include <curl/curl.h>
 +#include "impersonate.h"
@@ -4415,6 +4435,435 @@ index 0000000000..aad5688f4f
 +    .tls_use_new_alps_codepoint = true,
 +    .tls_signed_cert_timestamps = true,
 +    .tls_grease = true,
++    .split_cookies = true,
++    .form_boundary = "webkit",
++  },
++  {
++    .target = "chrome151",
++    .alias = "chrome151",
++    .quic_initial_packet_number = 1,
++    .httpversion = CURL_HTTP_VERSION_2_0,
++    .ssl_version = CURL_SSLVERSION_TLSv1_2 | CURL_SSLVERSION_MAX_DEFAULT,
++    .ciphers =
++      "TLS_AES_128_GCM_SHA256:"
++      "TLS_AES_256_GCM_SHA384:"
++      "TLS_CHACHA20_POLY1305_SHA256:"
++      "ECDHE-ECDSA-AES128-GCM-SHA256:"
++      "ECDHE-RSA-AES128-GCM-SHA256:"
++      "ECDHE-ECDSA-AES256-GCM-SHA384:"
++      "ECDHE-RSA-AES256-GCM-SHA384:"
++      "ECDHE-ECDSA-CHACHA20-POLY1305:"
++      "ECDHE-RSA-CHACHA20-POLY1305:"
++      "ECDHE-RSA-AES128-SHA:"
++      "ECDHE-RSA-AES256-SHA:"
++      "AES128-GCM-SHA256:"
++      "AES256-GCM-SHA384:"
++      "AES128-SHA:"
++      "AES256-SHA",
++    .curves = "X25519MLKEM768:X25519:P-256:P-384",
++    .sig_hash_algs =
++      "mldsa44:"
++      "mldsa65:"
++      "mldsa87:"
++      "ecdsa_secp256r1_sha256:"
++      "rsa_pss_rsae_sha256:"
++      "rsa_pkcs1_sha256:"
++      "ecdsa_secp384r1_sha384:"
++      "rsa_pss_rsae_sha384:"
++      "rsa_pkcs1_sha384:"
++      "rsa_pss_rsae_sha512:"
++      "rsa_pkcs1_sha512",
++    .http3_sig_hash_algs =
++      "ecdsa_secp256r1_sha256:"
++      "rsa_pss_rsae_sha256:"
++      "rsa_pkcs1_sha256:"
++      "ecdsa_secp384r1_sha384:"
++      "rsa_pss_rsae_sha384:"
++      "rsa_pkcs1_sha384:"
++      "rsa_pss_rsae_sha512:"
++      "rsa_pkcs1_sha512:"
++      "rsa_pkcs1_sha1",
++    .npn = false,
++    .alpn = true,
++    .alps = true,
++    .tls_permute_extensions = true,
++    .tls_session_ticket = true,
++    .cert_compression = "brotli",
++    .http_headers = {
++      "sec-ch-ua: \"Not=A?Brand\";v=\"99\", \"Google Chrome\";v=\"151\", \"Chromium\";v=\"151\"",
++      "sec-ch-ua-mobile: ?0",
++      "sec-ch-ua-platform: \"macOS\"",
++      "Upgrade-Insecure-Requests: 1",
++      "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
++      "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
++      "Sec-Fetch-Site: none",
++      "Sec-Fetch-Mode: navigate",
++      "Sec-Fetch-User: ?1",
++      "Sec-Fetch-Dest: document",
++      "Accept-Encoding: gzip, deflate, br, zstd",
++      "Accept-Language: en-US,en;q=0.9",
++      "Priority: u=0, i"
++    },
++    .http2_settings = "1:65536;2:0;4:6291456;6:262144",
++    .http2_window_update = 15663105,
++    .http2_stream_weight = 256,
++    .http2_stream_exclusive = 1,
++    .http3_settings = "1:65536;6:262144;7:100;51:1;GREASE",
++    .http3_pseudo_headers_order = "masp",
++    .quic_cid_length = "webkit",
++    .quic_transport_parameters = "1:30000;3:1472;4:15728640;5:6291456;6:6291456;7:6291456;8:100;9:103;15:;17:1@1,GREASE;32:65536;12584:0x4f524947;GREASE",
++    .http3_tls_extension_order = "0-10-13-16-27-43-45-51-57-17613-65037",
++    .ech = "true",
++    .tls_extension_order = NULL,
++    .tls_use_new_alps_codepoint = true,
++    .tls_signed_cert_timestamps = true,
++    .tls_grease = true,
++    .split_cookies = true,
++    .form_boundary = "webkit",
++  },
++  {
++    .target = "chrome152",
++    .alias = "chrome152",
++    .quic_initial_packet_number = 1,
++    .httpversion = CURL_HTTP_VERSION_2_0,
++    .ssl_version = CURL_SSLVERSION_TLSv1_2 | CURL_SSLVERSION_MAX_DEFAULT,
++    .ciphers =
++      "TLS_AES_128_GCM_SHA256:"
++      "TLS_AES_256_GCM_SHA384:"
++      "TLS_CHACHA20_POLY1305_SHA256:"
++      "ECDHE-ECDSA-AES128-GCM-SHA256:"
++      "ECDHE-RSA-AES128-GCM-SHA256:"
++      "ECDHE-ECDSA-AES256-GCM-SHA384:"
++      "ECDHE-RSA-AES256-GCM-SHA384:"
++      "ECDHE-ECDSA-CHACHA20-POLY1305:"
++      "ECDHE-RSA-CHACHA20-POLY1305:"
++      "ECDHE-RSA-AES128-SHA:"
++      "ECDHE-RSA-AES256-SHA:"
++      "AES128-GCM-SHA256:"
++      "AES256-GCM-SHA384:"
++      "AES128-SHA:"
++      "AES256-SHA",
++    .curves = "X25519MLKEM768:X25519:P-256:P-384",
++    .sig_hash_algs =
++      "mldsa44:"
++      "mldsa65:"
++      "mldsa87:"
++      "ecdsa_secp256r1_sha256:"
++      "rsa_pss_rsae_sha256:"
++      "rsa_pkcs1_sha256:"
++      "ecdsa_secp384r1_sha384:"
++      "rsa_pss_rsae_sha384:"
++      "rsa_pkcs1_sha384:"
++      "rsa_pss_rsae_sha512:"
++      "rsa_pkcs1_sha512",
++    .http3_sig_hash_algs =
++      "ecdsa_secp256r1_sha256:"
++      "rsa_pss_rsae_sha256:"
++      "rsa_pkcs1_sha256:"
++      "ecdsa_secp384r1_sha384:"
++      "rsa_pss_rsae_sha384:"
++      "rsa_pkcs1_sha384:"
++      "rsa_pss_rsae_sha512:"
++      "rsa_pkcs1_sha512:"
++      "rsa_pkcs1_sha1",
++    .npn = false,
++    .alpn = true,
++    .alps = true,
++    .tls_permute_extensions = true,
++    .tls_session_ticket = true,
++    .cert_compression = "brotli",
++    .http_headers = {
++      "sec-ch-ua: \"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\"",
++      "sec-ch-ua-mobile: ?0",
++      "sec-ch-ua-platform: \"macOS\"",
++      "Upgrade-Insecure-Requests: 1",
++      "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
++      "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
++      "Sec-Fetch-Site: none",
++      "Sec-Fetch-Mode: navigate",
++      "Sec-Fetch-User: ?1",
++      "Sec-Fetch-Dest: document",
++      "Accept-Encoding: gzip, deflate, br, zstd",
++      "Accept-Language: en-US,en;q=0.9",
++      "Priority: u=0, i"
++    },
++    .http2_settings = "1:65536;2:0;4:6291456;6:262144",
++    .http2_window_update = 15663105,
++    .http2_stream_weight = 256,
++    .http2_stream_exclusive = 1,
++    .http3_settings = "1:65536;6:262144;7:100;51:1;GREASE",
++    .http3_pseudo_headers_order = "masp",
++    .quic_cid_length = "webkit",
++    .quic_transport_parameters = "1:30000;3:1472;4:15728640;5:6291456;6:6291456;7:6291456;8:100;9:103;15:;17:1@1,GREASE;32:65536;12584:0x4f524947;GREASE",
++    .http3_tls_extension_order = "0-10-13-16-27-43-45-51-57-17613-65037",
++    .ech = "true",
++    .tls_extension_order = NULL,
++    .tls_trust_anchors =
++      "44947.2.1,"
++      "44947.2.6,"
++      "44947.2.13,"
++      "44947.2.14,"
++      "44947.2.15,"
++      "44947.2.18,"
++      "44947.2.19,"
++      "44947.2.20,"
++      "52580.200109.1.7,"
++      "52580.200109.1.8,"
++      "52580.200109.1.9,"
++      "52580.200109.1.10,"
++      "52580.200109.1.11,"
++      "52580.200109.1.12,"
++      "52580.200109.1.13,"
++      "52580.200109.1.18,"
++      "52580.200109.1.19,"
++      "11129.9.1,"
++      "11129.9.2,"
++      "11129.9.3,"
++      "11129.9.4,"
++      "11129.9.5,"
++      "11129.9.6,"
++      "11129.9.7,"
++      "11129.9.8,"
++      "11129.9.9,"
++      "11129.9.10,"
++      "11129.9.11,"
++      "11129.9.12,"
++      "11129.9.13,"
++      "11129.9.14,"
++      "11129.9.15",
++    .tls_trust_anchors_no_shuffle = true,
++    .tls_use_new_alps_codepoint = true,
++    .tls_signed_cert_timestamps = true,
++    .tls_grease = true,
++    .tls_grease_sigalgs = true,
++    .split_cookies = true,
++    .form_boundary = "webkit",
++  },
++  {
++    .target = "chrome153",
++    .alias = "chrome153",
++    .quic_initial_packet_number = 1,
++    .httpversion = CURL_HTTP_VERSION_2_0,
++    .ssl_version = CURL_SSLVERSION_TLSv1_2 | CURL_SSLVERSION_MAX_DEFAULT,
++    .ciphers =
++      "TLS_AES_128_GCM_SHA256:"
++      "TLS_AES_256_GCM_SHA384:"
++      "TLS_CHACHA20_POLY1305_SHA256:"
++      "ECDHE-ECDSA-AES128-GCM-SHA256:"
++      "ECDHE-RSA-AES128-GCM-SHA256:"
++      "ECDHE-ECDSA-AES256-GCM-SHA384:"
++      "ECDHE-RSA-AES256-GCM-SHA384:"
++      "ECDHE-ECDSA-CHACHA20-POLY1305:"
++      "ECDHE-RSA-CHACHA20-POLY1305:"
++      "ECDHE-RSA-AES128-SHA:"
++      "ECDHE-RSA-AES256-SHA:"
++      "AES128-GCM-SHA256:"
++      "AES256-GCM-SHA384:"
++      "AES128-SHA:"
++      "AES256-SHA",
++    .curves = "X25519MLKEM768:X25519:P-256:P-384",
++    .sig_hash_algs =
++      "mldsa44:"
++      "mldsa65:"
++      "mldsa87:"
++      "ecdsa_secp256r1_sha256:"
++      "rsa_pss_rsae_sha256:"
++      "rsa_pkcs1_sha256:"
++      "ecdsa_secp384r1_sha384:"
++      "rsa_pss_rsae_sha384:"
++      "rsa_pkcs1_sha384:"
++      "rsa_pss_rsae_sha512:"
++      "rsa_pkcs1_sha512",
++    .http3_sig_hash_algs =
++      "ecdsa_secp256r1_sha256:"
++      "rsa_pss_rsae_sha256:"
++      "rsa_pkcs1_sha256:"
++      "ecdsa_secp384r1_sha384:"
++      "rsa_pss_rsae_sha384:"
++      "rsa_pkcs1_sha384:"
++      "rsa_pss_rsae_sha512:"
++      "rsa_pkcs1_sha512:"
++      "rsa_pkcs1_sha1",
++    .npn = false,
++    .alpn = true,
++    .alps = true,
++    .tls_permute_extensions = true,
++    .tls_session_ticket = true,
++    .cert_compression = "brotli",
++    .http_headers = {
++      "sec-ch-ua: \"Google Chrome\";v=\"153\", \"Not_A Brand\";v=\"8\", \"Chromium\";v=\"153\"",
++      "sec-ch-ua-mobile: ?0",
++      "sec-ch-ua-platform: \"macOS\"",
++      "Upgrade-Insecure-Requests: 1",
++      "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
++      "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
++      "Sec-Fetch-Site: none",
++      "Sec-Fetch-Mode: navigate",
++      "Sec-Fetch-User: ?1",
++      "Sec-Fetch-Dest: document",
++      "Accept-Encoding: gzip, deflate, br, zstd",
++      "Accept-Language: en-US,en;q=0.9",
++      "Priority: u=0, i"
++    },
++    .http2_settings = "1:65536;2:0;4:6291456;6:262144",
++    .http2_window_update = 15663105,
++    .http2_stream_weight = 256,
++    .http2_stream_exclusive = 1,
++    .http3_settings = "1:65536;6:262144;7:100;51:1;GREASE",
++    .http3_pseudo_headers_order = "masp",
++    .quic_cid_length = "webkit",
++    .quic_transport_parameters = "1:30000;3:1472;4:15728640;5:6291456;6:6291456;7:6291456;8:100;9:103;15:;17:1@1,GREASE;32:65536;12584:0x4f524947;GREASE",
++    .http3_tls_extension_order = "0-10-13-16-27-43-45-51-57-17613-65037",
++    .ech = "true",
++    .tls_extension_order = NULL,
++    .tls_trust_anchors =
++      "44947.2.1,"
++      "44947.2.6,"
++      "44947.2.13,"
++      "44947.2.14,"
++      "44947.2.15,"
++      "44947.2.18,"
++      "44947.2.19,"
++      "44947.2.20,"
++      "52580.200109.1.7,"
++      "52580.200109.1.8,"
++      "52580.200109.1.9,"
++      "52580.200109.1.10,"
++      "52580.200109.1.11,"
++      "52580.200109.1.12,"
++      "52580.200109.1.13,"
++      "52580.200109.1.18,"
++      "52580.200109.1.19,"
++      "11129.9.1,"
++      "11129.9.4,"
++      "11129.9.5,"
++      "11129.9.6,"
++      "11129.9.7,"
++      "11129.9.8,"
++      "11129.9.10,"
++      "11129.9.11,"
++      "11129.9.12,"
++      "11129.9.13,"
++      "11129.9.15",
++    .tls_trust_anchors_no_shuffle = true,
++    .tls_use_new_alps_codepoint = true,
++    .tls_signed_cert_timestamps = true,
++    .tls_grease = true,
++    .tls_grease_sigalgs = true,
++    .split_cookies = true,
++    .form_boundary = "webkit",
++  },
++  {
++    .target = "chrome154",
++    .alias = "chrome154",
++    .quic_initial_packet_number = 1,
++    .httpversion = CURL_HTTP_VERSION_2_0,
++    .ssl_version = CURL_SSLVERSION_TLSv1_2 | CURL_SSLVERSION_MAX_DEFAULT,
++    .ciphers =
++      "TLS_AES_128_GCM_SHA256:"
++      "TLS_AES_256_GCM_SHA384:"
++      "TLS_CHACHA20_POLY1305_SHA256:"
++      "ECDHE-ECDSA-AES128-GCM-SHA256:"
++      "ECDHE-RSA-AES128-GCM-SHA256:"
++      "ECDHE-ECDSA-AES256-GCM-SHA384:"
++      "ECDHE-RSA-AES256-GCM-SHA384:"
++      "ECDHE-ECDSA-CHACHA20-POLY1305:"
++      "ECDHE-RSA-CHACHA20-POLY1305:"
++      "ECDHE-RSA-AES128-SHA:"
++      "ECDHE-RSA-AES256-SHA:"
++      "AES128-GCM-SHA256:"
++      "AES256-GCM-SHA384:"
++      "AES128-SHA:"
++      "AES256-SHA",
++    .curves = "X25519MLKEM768:X25519:P-256:P-384",
++    .sig_hash_algs =
++      "mldsa44:"
++      "mldsa65:"
++      "mldsa87:"
++      "ecdsa_secp256r1_sha256:"
++      "rsa_pss_rsae_sha256:"
++      "rsa_pkcs1_sha256:"
++      "ecdsa_secp384r1_sha384:"
++      "rsa_pss_rsae_sha384:"
++      "rsa_pkcs1_sha384:"
++      "rsa_pss_rsae_sha512:"
++      "rsa_pkcs1_sha512",
++    .http3_sig_hash_algs =
++      "ecdsa_secp256r1_sha256:"
++      "rsa_pss_rsae_sha256:"
++      "rsa_pkcs1_sha256:"
++      "ecdsa_secp384r1_sha384:"
++      "rsa_pss_rsae_sha384:"
++      "rsa_pkcs1_sha384:"
++      "rsa_pss_rsae_sha512:"
++      "rsa_pkcs1_sha512:"
++      "rsa_pkcs1_sha1",
++    .npn = false,
++    .alpn = true,
++    .alps = true,
++    .tls_permute_extensions = true,
++    .tls_session_ticket = true,
++    .cert_compression = "brotli",
++    .http_headers = {
++      "sec-ch-ua: \"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
++      "sec-ch-ua-mobile: ?0",
++      "sec-ch-ua-platform: \"macOS\"",
++      "Upgrade-Insecure-Requests: 1",
++      "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
++      "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
++      "Sec-Fetch-Site: none",
++      "Sec-Fetch-Mode: navigate",
++      "Sec-Fetch-User: ?1",
++      "Sec-Fetch-Dest: document",
++      "Accept-Encoding: gzip, deflate, br, zstd",
++      "Accept-Language: en-US,en;q=0.9",
++      "Priority: u=0, i"
++    },
++    .http2_settings = "1:65536;2:0;4:6291456;6:262144",
++    .http2_window_update = 15663105,
++    .http2_stream_weight = 256,
++    .http2_stream_exclusive = 1,
++    .http3_settings = "1:65536;6:262144;7:100;51:1;GREASE",
++    .http3_pseudo_headers_order = "masp",
++    .quic_cid_length = "webkit",
++    .quic_transport_parameters = "1:30000;3:1472;4:15728640;5:6291456;6:6291456;7:6291456;8:100;9:103;15:;17:1@1,GREASE;32:65536;12584:0x4f524947;GREASE",
++    .http3_tls_extension_order = "0-10-13-16-27-43-45-51-57-17613-65037",
++    .ech = "true",
++    .tls_extension_order = NULL,
++    .tls_trust_anchors =
++      "44947.2.1,"
++      "44947.2.6,"
++      "44947.2.13,"
++      "44947.2.14,"
++      "44947.2.15,"
++      "44947.2.18,"
++      "44947.2.19,"
++      "44947.2.20,"
++      "52580.200109.1.7,"
++      "52580.200109.1.8,"
++      "52580.200109.1.9,"
++      "52580.200109.1.10,"
++      "52580.200109.1.11,"
++      "52580.200109.1.12,"
++      "52580.200109.1.13,"
++      "52580.200109.1.18,"
++      "52580.200109.1.19,"
++      "11129.9.1,"
++      "11129.9.4,"
++      "11129.9.5,"
++      "11129.9.6,"
++      "11129.9.7,"
++      "11129.9.8,"
++      "11129.9.10,"
++      "11129.9.11,"
++      "11129.9.12,"
++      "11129.9.13,"
++      "11129.9.15",
++    .tls_trust_anchors_no_shuffle = true,
++    .tls_use_new_alps_codepoint = true,
++    .tls_signed_cert_timestamps = true,
++    .tls_grease = true,
++    .tls_grease_sigalgs = true,
 +    .split_cookies = true,
 +    .form_boundary = "webkit",
 +  },
@@ -5746,10 +6195,10 @@ index 0000000000..aad5688f4f
 +const size_t num_impersonations = sizeof(impersonations) / sizeof(impersonations[0]);
 diff --git a/lib/impersonate.h b/lib/impersonate.h
 new file mode 100644
-index 0000000000..e36ec5a312
+index 0000000000..dda43c7236
 --- /dev/null
 +++ b/lib/impersonate.h
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,87 @@
 +#ifndef HEADER_CURL_IMPERSONATE_H
 +#define HEADER_CURL_IMPERSONATE_H
 +
@@ -5809,6 +6258,7 @@ index 0000000000..e36ec5a312
 +  bool tls_use_new_alps_codepoint;
 +  bool tls_signed_cert_timestamps;
 +  const char *tls_trust_anchors;
++  bool tls_trust_anchors_no_shuffle;
 +  const char *ech;
 +  const char *tls_extension_order;
 +  const char *http3_tls_extension_order;
@@ -5816,6 +6266,7 @@ index 0000000000..e36ec5a312
 +  int tls_record_size_limit;
 +  int tls_key_shares_limit;  // for firefox key_shares extension
 +  bool tls_grease;
++  bool tls_grease_sigalgs;
 +  int http2_stream_weight;
 +  int http2_stream_exclusive;
 +  bool http2_no_priority;  // disable http2 priority in header frame
@@ -6032,7 +6483,7 @@ index 3bfcd88ebe..71c753e135 100644
  };
  
 diff --git a/lib/setopt.c b/lib/setopt.c
-index 0e15980b8f..4d4e6ccab1 100644
+index 0e15980b8f..a42a8b163a 100644
 --- a/lib/setopt.c
 +++ b/lib/setopt.c
 @@ -45,8 +45,10 @@
@@ -6181,7 +6632,7 @@ index 0e15980b8f..4d4e6ccab1 100644
  #endif /* !CURL_DISABLE_PROXY */
  #if defined(HAVE_GSSAPI) || defined(USE_WINDOWS_SSPI)
    case CURLOPT_SOCKS5_GSSAPI_NEC:
-@@ -732,6 +834,36 @@ static CURLcode setopt_long_bool(struct Curl_easy *data, CURLoption option,
+@@ -732,6 +834,42 @@ static CURLcode setopt_long_bool(struct Curl_easy *data, CURLoption option,
    case CURLOPT_SSL_ENABLE_ALPN:
      s->ssl_enable_alpn = enabled;
      break;
@@ -6206,6 +6657,12 @@ index 0e15980b8f..4d4e6ccab1 100644
 +  case CURLOPT_TLS_GREASE:
 +    s->tls_grease = enabled;
 +    break;
++  case CURLOPT_TLS_GREASE_SIGALGS:
++    s->tls_grease_sigalgs = enabled;
++    break;
++  case CURLOPT_TLS_TRUST_ANCHORS_SHUFFLE:
++    s->tls_trust_anchors_no_shuffle = !enabled;
++    break;
 +  case CURLOPT_TLS_KEY_USAGE_NO_CHECK:
 +    s->tls_key_usage_no_check = enabled;
 +    break;
@@ -6218,7 +6675,7 @@ index 0e15980b8f..4d4e6ccab1 100644
    case CURLOPT_PATH_AS_IS:
      s->path_as_is = enabled;
      break;
-@@ -943,6 +1075,15 @@ static CURLcode setopt_long_ssl(struct Curl_easy *data, CURLoption option,
+@@ -943,6 +1081,15 @@ static CURLcode setopt_long_ssl(struct Curl_easy *data, CURLoption option,
  #endif
    case CURLOPT_SSL_ENABLE_NPN:
      break;
@@ -6234,7 +6691,7 @@ index 0e15980b8f..4d4e6ccab1 100644
    case CURLOPT_SSLENGINE_DEFAULT:
      CURL_EASY_STR_CLEAR(data, STRING_SSL_ENGINE);
      result = Curl_ssl_set_engine_default(data);
-@@ -1020,7 +1161,7 @@ static CURLcode setopt_long_http(struct Curl_easy *data, CURLoption option,
+@@ -1020,7 +1167,7 @@ static CURLcode setopt_long_http(struct Curl_easy *data, CURLoption option,
  
    switch(option) {
    case CURLOPT_FOLLOWLOCATION:
@@ -6243,7 +6700,7 @@ index 0e15980b8f..4d4e6ccab1 100644
        result = CURLE_BAD_FUNCTION_ARGUMENT;
      else
        s->http_follow_mode = (unsigned char)arg;
-@@ -1046,6 +1187,34 @@ static CURLcode setopt_long_http(struct Curl_easy *data, CURLoption option,
+@@ -1046,6 +1193,34 @@ static CURLcode setopt_long_http(struct Curl_easy *data, CURLoption option,
      return httpauth(data, FALSE, (unsigned long)arg);
    case CURLOPT_HTTP_VERSION:
      return setopt_HTTP_VERSION(data, arg);
@@ -6278,7 +6735,7 @@ index 0e15980b8f..4d4e6ccab1 100644
    case CURLOPT_EXPECT_100_TIMEOUT_MS:
      result = value_range(&arg, 0, 0, 0xffff);
      if(!result)
-@@ -1361,6 +1530,23 @@ static CURLcode setopt_slist(struct Curl_easy *data, CURLoption option,
+@@ -1361,6 +1536,23 @@ static CURLcode setopt_slist(struct Curl_easy *data, CURLoption option,
       */
      s->headers = slist;
      break;
@@ -6302,7 +6759,7 @@ index 0e15980b8f..4d4e6ccab1 100644
  #endif
  #ifndef CURL_DISABLE_TELNET
    case CURLOPT_TELNETOPTIONS:
-@@ -1472,6 +1658,9 @@ static CURLcode setopt_pointers(struct Curl_easy *data, CURLoption option,
+@@ -1472,6 +1664,9 @@ static CURLcode setopt_pointers(struct Curl_easy *data, CURLoption option,
  #ifndef CURL_DISABLE_MIME
    case CURLOPT_MIMEPOST:
      result = setopt_mimepost(data, va_arg(param, curl_mime *));
@@ -6312,7 +6769,7 @@ index 0e15980b8f..4d4e6ccab1 100644
      break;
  #endif /* !CURL_DISABLE_MIME */
  #endif /* !CURL_DISABLE_HTTP || !CURL_DISABLE_SMTP || !CURL_DISABLE_IMAP */
-@@ -1987,6 +2176,9 @@ static CURLcode setopt_cptr_ssl(struct Curl_easy *data, CURLoption option,
+@@ -1987,6 +2182,9 @@ static CURLcode setopt_cptr_ssl(struct Curl_easy *data, CURLoption option,
      if(Curl_ssl_supports(data, SSLSUPP_SSL_EC_CURVES))
        return Curl_setstropt(data, STRING_SSL_EC_CURVES, ptr);
      return CURLE_NOT_BUILT_IN;
@@ -6322,7 +6779,7 @@ index 0e15980b8f..4d4e6ccab1 100644
    case CURLOPT_SSL_SIGNATURE_ALGORITHMS:
      /*
       * Set accepted signature algorithms.
-@@ -2495,6 +2687,105 @@ static CURLcode setopt_cptr_misc(struct Curl_easy *data, CURLoption option,
+@@ -2495,6 +2693,105 @@ static CURLcode setopt_cptr_misc(struct Curl_easy *data, CURLoption option,
    return result;
  }
  
@@ -6428,7 +6885,7 @@ index 0e15980b8f..4d4e6ccab1 100644
  static CURLcode setopt_cptr(struct Curl_easy *data, CURLoption option,
                              char *ptr)
  {
-@@ -2506,6 +2797,7 @@ static CURLcode setopt_cptr(struct Curl_easy *data, CURLoption option,
+@@ -2506,6 +2803,7 @@ static CURLcode setopt_cptr(struct Curl_easy *data, CURLoption option,
  #if defined(USE_SSL) || defined(USE_SSH)
      setopt_cptr_ssl,
  #endif
@@ -6436,7 +6893,7 @@ index 0e15980b8f..4d4e6ccab1 100644
  #ifndef CURL_DISABLE_PROXY
      setopt_cptr_proxy,
  #endif
-@@ -2893,6 +3185,9 @@ CURLcode Curl_vsetopt(struct Curl_easy *data, CURLoption option, va_list param)
+@@ -2893,6 +3191,9 @@ CURLcode Curl_vsetopt(struct Curl_easy *data, CURLoption option, va_list param)
         way than being listed explicitly */
      switch(option) {
      case CURLOPT_HTTPHEADER:
@@ -7231,7 +7688,7 @@ index 0ad0d549ed..9bd7bfb3dc 100644
                          const char *thisheader,
                          const size_t thislen);
 diff --git a/lib/url.c b/lib/url.c
-index 6eeae43d0d..24066d4589 100644
+index 6eeae43d0d..297b59828d 100644
 --- a/lib/url.c
 +++ b/lib/url.c
 @@ -175,6 +175,10 @@ void Curl_freeset(struct Curl_easy *data)
@@ -7270,7 +7727,7 @@ index 6eeae43d0d..24066d4589 100644
  #endif
  #ifndef CURL_DISABLE_FTP
    set->wildcard_enabled = FALSE;
-@@ -409,8 +415,17 @@ void Curl_init_userdefined(struct Curl_easy *data)
+@@ -409,8 +415,19 @@ void Curl_init_userdefined(struct Curl_easy *data)
    set->tcp_fastopen = FALSE;
    set->tcp_nodelay = TRUE;
    set->ssl_enable_alpn = TRUE;
@@ -7279,6 +7736,8 @@ index 6eeae43d0d..24066d4589 100644
 +    CURL_HTTP3_SSL_PERMUTE_FALLBACK;
 +  set->quic_initial_packet_number = 0;
 +  set->tls_grease = FALSE;
++  set->tls_grease_sigalgs = FALSE;
++  set->tls_trust_anchors_no_shuffle = FALSE;
 +  set->tls_use_new_alps_codepoint = FALSE;
    set->expect_100_timeout = 1000L; /* Wait for a second by default. */
    set->sep_headers = TRUE; /* separated header lists by default */
@@ -7288,7 +7747,7 @@ index 6eeae43d0d..24066d4589 100644
    set->buffer_size = READBUFFER_SIZE;
    set->upload_buffer_size = UPLOADBUFFER_DEFAULT;
    set->upload_flags = CURLULFLAG_SEEN;
-@@ -1202,6 +1217,10 @@ static struct connectdata *allocate_conn(struct Curl_easy *data)
+@@ -1202,6 +1219,10 @@ static struct connectdata *allocate_conn(struct Curl_easy *data)
  #endif
    conn->ip_version = data->set.ipver;
    conn->bits.connect_only = (bool)data->set.connect_only;
@@ -7299,7 +7758,7 @@ index 6eeae43d0d..24066d4589 100644
    conn->transport_wanted = TRNSPRT_TCP; /* most of them are TCP streams */
  
    /* Store the local bind parameters that will be used for this connection */
-@@ -2091,6 +2110,11 @@ static CURLcode url_create_needle(struct Curl_easy *data,
+@@ -2091,6 +2112,11 @@ static CURLcode url_create_needle(struct Curl_easy *data,
         (default) */
      if(data->set.ssl_enable_alpn)
        needle->bits.tls_enable_alpn = TRUE;
@@ -7311,7 +7770,7 @@ index 6eeae43d0d..24066d4589 100644
    }
  
    if(network_scheme) {
-@@ -2293,7 +2317,7 @@ static CURLcode url_find_or_create_conn(struct Curl_easy *data)
+@@ -2293,7 +2319,7 @@ static CURLcode url_find_or_create_conn(struct Curl_easy *data)
  #endif
  
    /* Complete the easy's SSL configuration for connection cache matching */
@@ -7320,7 +7779,7 @@ index 6eeae43d0d..24066d4589 100644
    if(result)
      goto out;
  
-@@ -2338,7 +2362,6 @@ static CURLcode url_find_or_create_conn(struct Curl_easy *data)
+@@ -2338,7 +2364,6 @@ static CURLcode url_find_or_create_conn(struct Curl_easy *data)
      /* We have decided that we want a new connection. We may not be able to do
         that if we have reached the limit of how many connections we are
         allowed to open. */
@@ -7328,7 +7787,7 @@ index 6eeae43d0d..24066d4589 100644
      if(waitpipe) {
        /* There is a connection that *might* become usable for multiplexing
           "soon", and we wait for that */
-@@ -2538,6 +2561,7 @@ CURLcode Curl_init_transfer(struct Curl_easy *data, struct connectdata *conn)
+@@ -2538,6 +2563,7 @@ CURLcode Curl_init_transfer(struct Curl_easy *data, struct connectdata *conn)
  void Curl_data_priority_clear_state(struct Curl_easy *data)
  {
    data->state.weight = 0;
@@ -7337,7 +7796,7 @@ index 6eeae43d0d..24066d4589 100644
  
  #endif /* USE_HTTP2 || USE_HTTP3 */
 diff --git a/lib/urldata.h b/lib/urldata.h
-index 1c0101847b..0ec0fff4de 100644
+index 1c0101847b..53bf0f0cd5 100644
 --- a/lib/urldata.h
 +++ b/lib/urldata.h
 @@ -185,6 +185,7 @@ struct ConnectBits {
@@ -7468,7 +7927,7 @@ index 1c0101847b..0ec0fff4de 100644
  #endif
    BIT(prefer_ascii);     /* ASCII rather than binary */
    BIT(remote_append);    /* append, not overwrite, on upload */
-@@ -1102,7 +1153,18 @@ struct UserDefined {
+@@ -1102,7 +1153,20 @@ struct UserDefined {
    BIT(sasl_ir);         /* Enable/disable SASL initial response */
    BIT(tcp_keepalive);  /* use TCP keepalives */
    BIT(tcp_fastopen);   /* use TCP Fast Open */
@@ -7480,6 +7939,8 @@ index 1c0101847b..0ec0fff4de 100644
 +  BIT(ssl_permute_extensions); /* TLS Permute extensions */
 +  CURLhttp3sslpermute http3_ssl_permute_extensions;
 +  BIT(tls_grease);  /* TLS grease? */
++  BIT(tls_grease_sigalgs);  /* TLS grease in signature_algorithms? */
++  BIT(tls_trust_anchors_no_shuffle); /* keep trust anchor order */
 +  BIT(tls_key_usage_no_check);  /* TLS key_usage_check? */
 +  BIT(tls_signed_cert_timestamps);  /* TLS signed cert timestamps? */
 +  BIT(tls_status_request);  /* TLS status request */
@@ -7487,7 +7948,7 @@ index 1c0101847b..0ec0fff4de 100644
    BIT(path_as_is);     /* allow dotdots? */
    BIT(pipewait);       /* wait for multiplex status before starting a new
                            connection */
-@@ -1128,6 +1190,12 @@ struct UserDefined {
+@@ -1128,6 +1192,12 @@ struct UserDefined {
    BIT(ws_raw_mode);
    BIT(ws_no_auto_pong);
  #endif
@@ -9136,7 +9597,7 @@ index bbc5777eac..c08e528427 100644
    return CURLE_OK;
  }
 diff --git a/lib/vtls/openssl.c b/lib/vtls/openssl.c
-index dedd8f3e70..a65c5ddda6 100644
+index dedd8f3e70..050fce4b49 100644
 --- a/lib/vtls/openssl.c
 +++ b/lib/vtls/openssl.c
 @@ -37,6 +37,7 @@
@@ -9563,13 +10024,13 @@ index dedd8f3e70..a65c5ddda6 100644
  #ifndef OPENSSL_NO_OCSP
    if(Curl_ssl_cf_get_primary_config(cf)->verifystatus)
      SSL_set_tlsext_status_type(octx->ssl, TLSEXT_STATUSTYPE_ocsp);
-@@ -3697,6 +4055,120 @@ static CURLcode ossl_init_method(struct Curl_cfilter *cf,
+@@ -3697,6 +4055,121 @@ static CURLcode ossl_init_method(struct Curl_cfilter *cf,
    return *pmethod ? CURLE_OK : CURLE_SSL_CONNECT_ERROR;
  }
  
 +#ifdef OPENSSL_IS_BORINGSSL
 +static CURLcode set_trust_anchors(struct Curl_easy *data, SSL_CTX *ctx,
-+                                  const char *anchors)
++                                  const char *anchors, bool shuffle)
 +{
 +  CBB ids;
 +  CURLcode result = CURLE_OK;
@@ -9638,8 +10099,9 @@ index dedd8f3e70..a65c5ddda6 100644
 +    }
 +
 +    /* The IDs form a set. Randomize only the temporary wire order, leaving
-+     * the configured value stable for connection and session cache keys. */
-+    for(i = id_count; i > 1; i--) {
++     * the configured value stable for connection and session cache keys.
++     * Chrome 154 sends a fixed order, so shuffling can be turned off. */
++    for(i = shuffle ? id_count : 0; i > 1; i--) {
 +      size_t random;
 +      size_t threshold = (size_t)(-i) % i;
 +      size_t selected;
@@ -9684,7 +10146,7 @@ index dedd8f3e70..a65c5ddda6 100644
  CURLcode Curl_ossl_ctx_init(struct ossl_ctx *octx,
                              struct Curl_cfilter *cf,
                              struct Curl_easy *data,
-@@ -3801,7 +4273,15 @@ CURLcode Curl_ossl_ctx_init(struct ossl_ctx *octx,
+@@ -3801,7 +4274,15 @@ CURLcode Curl_ossl_ctx_init(struct ossl_ctx *octx,
       workarounds. In order to keep the secure workaround, the
       SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS bit must not be set. */
  
@@ -9701,7 +10163,7 @@ index dedd8f3e70..a65c5ddda6 100644
  
    /* mitigate CVE-2010-4180 */
    ctx_options &= ~(ctx_option_t)SSL_OP_NETSCAPE_REUSE_CIPHER_CHANGE_BUG;
-@@ -3857,10 +4337,29 @@ CURLcode Curl_ossl_ctx_init(struct ossl_ctx *octx,
+@@ -3857,10 +4338,29 @@ CURLcode Curl_ossl_ctx_init(struct ossl_ctx *octx,
    /* We do retry writes sometimes from another buffer address */
    SSL_CTX_set_mode(octx->ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
  
@@ -9731,7 +10193,7 @@ index dedd8f3e70..a65c5ddda6 100644
      if(!SSL_CTX_set_cipher_list(octx->ssl_ctx, ciphers)) {
        failf(data, "failed setting cipher list: %s", ciphers);
        return CURLE_SSL_CIPHER;
-@@ -3901,7 +4400,8 @@ CURLcode Curl_ossl_ctx_init(struct ossl_ctx *octx,
+@@ -3901,7 +4401,8 @@ CURLcode Curl_ossl_ctx_init(struct ossl_ctx *octx,
  #endif
  
    {
@@ -9741,7 +10203,7 @@ index dedd8f3e70..a65c5ddda6 100644
      if(curves) {
  #ifdef HAVE_BORINGSSL_LIKE
  #define OSSL_CURVE_CAST(x) (x)
-@@ -3915,10 +4415,12 @@ CURLcode Curl_ossl_ctx_init(struct ossl_ctx *octx,
+@@ -3915,10 +4416,12 @@ CURLcode Curl_ossl_ctx_init(struct ossl_ctx *octx,
      }
    }
  
@@ -9756,7 +10218,7 @@ index dedd8f3e70..a65c5ddda6 100644
      if(signature_algorithms) {
        if(!SSL_CTX_set1_sigalgs_list(octx->ssl_ctx,
                                      OSSL_SIGALG_CAST(signature_algorithms))) {
-@@ -3930,6 +4432,104 @@ CURLcode Curl_ossl_ctx_init(struct ossl_ctx *octx,
+@@ -3930,6 +4433,109 @@ CURLcode Curl_ossl_ctx_init(struct ossl_ctx *octx,
    }
  #endif
  
@@ -9802,9 +10264,14 @@ index dedd8f3e70..a65c5ddda6 100644
 +  else if(data->set.tls_grease)
 +    SSL_CTX_set_grease_enabled(octx->ssl_ctx, 1);
 +
++  /* curl-impersonate: GREASE signature_algorithms, Chrome 152+. */
++  if(data->set.tls_grease_sigalgs && peer->transport != TRNSPRT_QUIC)
++    SSL_CTX_set_grease_sigalgs_enabled(octx->ssl_ctx, 1);
++
 +  if(conn_config->trust_anchors) {
++    bool shuffle = !data->set.tls_trust_anchors_no_shuffle;
 +    CURLcode result = set_trust_anchors(data, octx->ssl_ctx,
-+                                        conn_config->trust_anchors);
++                                        conn_config->trust_anchors, shuffle);
 +    if(result)
 +      return result;
 +  }
@@ -9861,7 +10328,7 @@ index dedd8f3e70..a65c5ddda6 100644
    /* OpenSSL always tries to verify the peer. By setting the failure mode
     * to NONE, we allow the connect to complete, regardless of the outcome.
     * We then explicitly check the result and may try alternatives like
-@@ -4271,8 +4871,10 @@ static CURLcode ossl_connect_step2(struct Curl_cfilter *cf,
+@@ -4271,8 +4877,10 @@ static CURLcode ossl_connect_step2(struct Curl_cfilter *cf,
  #endif
        else {
          result = CURLE_SSL_CONNECT_ERROR;
@@ -9874,7 +10341,7 @@ index dedd8f3e70..a65c5ddda6 100644
        }
  
        /* detail is already set to the SSL error above */
-@@ -4285,10 +4887,20 @@ static CURLcode ossl_connect_step2(struct Curl_cfilter *cf,
+@@ -4285,10 +4893,20 @@ static CURLcode ossl_connect_step2(struct Curl_cfilter *cf,
          char extramsg[80] = "";
          int sockerr = SOCKERRNO;
  
@@ -9898,7 +10365,7 @@ index dedd8f3e70..a65c5ddda6 100644
                connssl->peer.origin->hostname, connssl->peer.origin->port);
        }
  
-@@ -4300,6 +4912,22 @@ static CURLcode ossl_connect_step2(struct Curl_cfilter *cf,
+@@ -4300,6 +4918,22 @@ static CURLcode ossl_connect_step2(struct Curl_cfilter *cf,
      connssl->connecting_state = ssl_connect_3;
      Curl_ossl_report_handshake(data, octx);
  
